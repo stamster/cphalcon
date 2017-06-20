@@ -3,10 +3,10 @@
  +------------------------------------------------------------------------+
  | Phalcon Framework                                                      |
  +------------------------------------------------------------------------+
- | Copyright (c) 2011-2015 Phalcon Team (http://www.phalconphp.com)       |
+ | Copyright (c) 2011-2017 Phalcon Team (https://phalconphp.com)          |
  +------------------------------------------------------------------------+
  | This source file is subject to the New BSD License that is bundled     |
- | with this package in the file docs/LICENSE.txt.                        |
+ | with this package in the file LICENSE.txt.                             |
  |                                                                        |
  | If you did not receive a copy of the license and are unable to         |
  | obtain it through the world-wide-web, please send an email             |
@@ -26,6 +26,8 @@ use Phalcon\DispatcherInterface;
 use Phalcon\Events\ManagerInterface;
 use Phalcon\Di\InjectionAwareInterface;
 use Phalcon\Events\EventsAwareInterface;
+use Phalcon\Mvc\Model\Binder;
+use Phalcon\Mvc\Model\BinderInterface;
 
 /**
  * Phalcon\Dispatcher
@@ -54,7 +56,7 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 
 	protected _actionName = null;
 
-	protected _params;
+	protected _params = [];
 
 	protected _returnedValue = null;
 
@@ -70,9 +72,15 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 
 	protected _actionSuffix = "Action";
 
+	protected _previousNamespaceName = null;
+
 	protected _previousHandlerName = null;
 
 	protected _previousActionName = null;
+
+	protected _modelBinding = false;
+
+	protected _modelBinder = null;
 
 	const EXCEPTION_NO_DI = 0;
 
@@ -85,14 +93,6 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 	const EXCEPTION_INVALID_PARAMS = 4;
 
 	const EXCEPTION_ACTION_NOT_FOUND = 5;
-
-	/**
-	 * Phalcon\Dispatcher constructor
-	 */
-	public function __construct()
-	{
-		let this->_params = [];
-	}
 
 	/**
 	 * Sets the dependency injector
@@ -132,6 +132,14 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 	public function setActionSuffix(string actionSuffix)
 	{
 		let this->_actionSuffix = actionSuffix;
+	}
+
+	/**
+	 * Gets the default action suffix
+	 */
+	public function getActionSuffix() -> string
+	{
+		return this->_actionSuffix;
 	}
 
 	/**
@@ -269,6 +277,17 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 	}
 
 	/**
+	 * Check if a param exists
+	 *
+	 * @param  mixed param
+	 * @return boolean
+	 */
+	public function hasParam(param) -> boolean
+	{
+		return isset this->_params[param];
+	}
+
+	/**
 	 * Returns the current method to be/executed in the dispatcher
 	 */
 	public function getActiveMethod() -> string
@@ -295,7 +314,7 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 	}
 
 	/**
-	 * Returns value returned by the lastest dispatched action
+	 * Returns value returned by the latest dispatched action
 	 *
 	 * @return mixed
 	 */
@@ -305,18 +324,111 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 	}
 
 	/**
+	 * Enable/Disable model binding during dispatch
+	 *
+	 * <code>
+	 * $di->set('dispatcher', function() {
+	 *     $dispatcher = new Dispatcher();
+	 *
+	 *     $dispatcher->setModelBinding(true, 'cache');
+	 *     return $dispatcher;
+	 * });
+	 * </code>
+	 *
+	 * @deprecated 3.1.0 Use setModelBinder method
+	 * @see Phalcon\Dispatcher::setModelBinder()
+	 */
+	deprecated public function setModelBinding(boolean value, var cache = null) -> <Dispatcher>
+	{
+		var dependencyInjector;
+
+		if typeof cache == "string" {
+			let dependencyInjector = this->_dependencyInjector;
+			let cache = dependencyInjector->get(cache);
+		}
+
+		let this->_modelBinding = value;
+		if value {
+			let this->_modelBinder = new Binder(cache);
+		}
+
+		return this;
+	}
+
+	/**
+	 * Enable model binding during dispatch
+	 *
+	 * <code>
+	 * $di->set('dispatcher', function() {
+	 *     $dispatcher = new Dispatcher();
+	 *
+	 *     $dispatcher->setModelBinder(new Binder(), 'cache');
+	 *     return $dispatcher;
+	 * });
+	 * </code>
+	 */
+	public function setModelBinder(<BinderInterface> modelBinder, var cache = null) -> <Dispatcher>
+	{
+		var dependencyInjector;
+
+		if typeof cache == "string" {
+			let dependencyInjector = this->_dependencyInjector;
+			let cache = dependencyInjector->get(cache);
+		}
+
+		if cache != null {
+			modelBinder->setCache(cache);
+		}
+
+		let this->_modelBinding = true;
+		let this->_modelBinder = modelBinder;
+
+		return this;
+	}
+
+	/**
+	 * Gets model binder
+	 */
+	public function getModelBinder() -> <BinderInterface>|null
+	{
+		return this->_modelBinder;
+	}
+
+	/**
 	 * Dispatches a handle action taking into account the routing parameters
 	 *
 	 * @return object
 	 */
 	public function dispatch()
 	{
+		var handler, e;
+
+		try {
+			let handler = this->_dispatch();
+		} catch \Exception, e {
+			if this->{"_handleException"}(e) === false {
+				return false;
+			}
+
+			throw e;
+		}
+
+		return handler;
+	}
+
+	/**
+	 * Dispatches a handle action taking into account the routing parameters
+	 *
+	 * @return object
+	 */
+	protected function _dispatch()
+	{
 		boolean hasService;
 		int numberDispatches;
 		var value, handler, dependencyInjector, namespaceName, handlerName,
 			actionName, params, eventsManager,
-			actionSuffix, handlerClass, status, actionMethod,
-			wasFresh = false, e;
+			actionSuffix, handlerClass, status, actionMethod, modelBinder, wasFresh = false,
+			e, bindCacheKey;
 
 		let dependencyInjector = <DiInterface> this->_dependencyInjector;
 		if typeof dependencyInjector != "object" {
@@ -428,7 +540,7 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 			// Check if the method exists in the handler
 			let actionMethod = actionName . actionSuffix;
 
-			if !method_exists(handler, actionMethod) {
+			if !is_callable([handler, actionMethod]) {
 
 				// Call beforeNotFoundAction
 				if typeof eventsManager == "object" {
@@ -503,12 +615,43 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 				}
 			}
 
+			if this->_modelBinding {
+				let modelBinder = this->_modelBinder;
+				let bindCacheKey = "_PHMB_" . handlerClass . "_" . actionMethod;
+				let params = modelBinder->bindToHandler(handler, params, bindCacheKey, actionMethod);
+			}
+
+			let this->_lastHandler = handler;
+
+			// Calling afterBinding
+			if typeof eventsManager == "object" {
+
+				if eventsManager->fire("dispatch:afterBinding", this) === false {
+					continue;
+				}
+
+				// Check if the user made a forward in the listener
+				if this->_finished === false {
+					continue;
+				}
+			}
+
+			// Calling afterBinding as callback and event
+			if method_exists(handler, "afterBinding") {
+
+				if handler->afterBinding(this) === false {
+					continue;
+				}
+
+				// Check if the user made a forward in the listener
+				if this->_finished === false {
+					continue;
+				}
+			}
+
 			try {
-
 				// We update the latest value produced by the latest handler
-				let this->_returnedValue = call_user_func_array([handler, actionMethod], params),
-					this->_lastHandler = handler;
-
+				let this->_returnedValue = this->callActionMethod(handler, actionMethod, params);
 			} catch \Exception, e {
 				if this->{"_handleException"}(e) === false {
 					if this->_finished === false {
@@ -556,12 +699,16 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 	}
 
 	/**
-	 * Forwards the execution flow to another controller/action
-	 * Dispatchers are unique per module. Forwarding between modules is not allowed
+	 * Forwards the execution flow to another controller/action.
 	 *
-	 *<code>
-	 *  $this->dispatcher->forward(array("controller" => "posts", "action" => "index"));
-	 *</code>
+	 * <code>
+	 * $this->dispatcher->forward(
+	 *     [
+	 *         "controller" => "posts",
+	 *         "action"     => "index",
+	 *     ]
+	 * );
+	 * </code>
 	 *
 	 * @param array forward
 	 */
@@ -576,7 +723,8 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 
 		// Check if we need to forward to another namespace
 		if fetch namespaceName, forward["namespace"] {
-			let this->_namespaceName = namespaceName;
+			let this->_previousNamespaceName = this->_namespaceName,
+				this->_namespaceName = namespaceName;
 		}
 
 		// Check if we need to forward to another controller
@@ -646,6 +794,37 @@ abstract class Dispatcher implements DispatcherInterface, InjectionAwareInterfac
 		}
 
 		return handlerClass;
+	}
+
+	public function callActionMethod(handler, string actionMethod, array! params = [])
+	{
+		return call_user_func_array([handler, actionMethod], params);
+	}
+
+	/**
+	 * Returns bound models from binder instance
+	 *
+	 * <code>
+	 * class UserController extends Controller
+	 * {
+	 *     public function showAction(User $user)
+	 *     {
+	 *         $boundModels = $this->dispatcher->getBoundModels(); // return array with $user
+	 *     }
+	 * }
+	 * </code>
+	 */
+	public function getBoundModels() -> array
+	{
+		var modelBinder;
+
+		let modelBinder = this->_modelBinder;
+
+		if modelBinder != null {
+			return modelBinder->getBoundModels();
+		}
+
+		return [];
 	}
 
 	/**
